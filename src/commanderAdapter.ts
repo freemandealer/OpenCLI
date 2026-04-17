@@ -17,6 +17,8 @@ import { type CliCommand, fullName, getRegistry } from './registry.js';
 import { formatRegistryHelpText } from './serialization.js';
 import { render as renderOutput } from './output.js';
 import { executeCommand, prepareCommandArgs } from './execution.js';
+import { shouldUseBrowserSession } from './capabilityRouting.js';
+import { isElectronApp } from './electron-apps.js';
 import {
   CliError,
   EXIT_CODES,
@@ -45,6 +47,7 @@ export function registerCommandToProgram(siteCmd: Command, cmd: CliCommand): voi
 
   const deprecatedSuffix = cmd.deprecated ? ' [deprecated]' : '';
   const subCmd = siteCmd.command(cmd.name).description(`${cmd.description}${deprecatedSuffix}`);
+  const supportsSharedBrowserTabs = shouldUseBrowserSession(cmd) && !isElectronApp(cmd.site);
   if (cmd.aliases?.length) subCmd.aliases(cmd.aliases);
 
   // Register positional args first, then named options
@@ -65,6 +68,11 @@ export function registerCommandToProgram(siteCmd: Command, cmd: CliCommand): voi
   subCmd
     .option('-f, --format <fmt>', 'Output format: table, plain, json, yaml, md, csv', 'table')
     .option('-v, --verbose', 'Debug output', false);
+  if (supportsSharedBrowserTabs) {
+    subCmd
+      .option('--tab <targetId>', 'Target tab/page identity from "browser tab list"')
+      .option('--keep-alive', 'Reuse the current page without reloading it, and keep the automation window alive after the command finishes', false);
+  }
 
   subCmd.addHelpText('after', formatRegistryHelpText(cmd));
 
@@ -92,6 +100,11 @@ export function registerCommandToProgram(siteCmd: Command, cmd: CliCommand): voi
       const verbose = optionsRecord.verbose === true;
       let format = typeof optionsRecord.format === 'string' ? optionsRecord.format : 'table';
       const formatExplicit = subCmd.getOptionValueSource('format') === 'cli';
+      const browserTargetPage = typeof optionsRecord.tab === 'string' && optionsRecord.tab.trim()
+        ? optionsRecord.tab.trim()
+        : undefined;
+      const keepAlive = supportsSharedBrowserTabs
+        && (optionsRecord.keepAlive === true || optionsRecord['keep-alive'] === true || !!browserTargetPage);
       if (verbose) process.env.OPENCLI_VERBOSE = '1';
       if (cmd.deprecated) {
         const message = typeof cmd.deprecated === 'string' ? cmd.deprecated : `${fullName(cmd)} is deprecated.`;
@@ -99,7 +112,11 @@ export function registerCommandToProgram(siteCmd: Command, cmd: CliCommand): voi
         log.warn(`Deprecated: ${message}${replacement}`);
       }
 
-      const result = await executeCommand(cmd, kwargs, verbose, { prepared: true });
+      const result = await executeCommand(cmd, kwargs, verbose, {
+        prepared: true,
+        ...(browserTargetPage ? { browserTargetPage } : {}),
+        ...(keepAlive ? { keepAlive: true } : {}),
+      });
       if (result === null || result === undefined) {
         return;
       }

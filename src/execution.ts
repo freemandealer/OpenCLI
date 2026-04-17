@@ -24,6 +24,11 @@ import { emitHook, type HookContext } from './hooks.js';
 import { log } from './logger.js';
 import { isElectronApp } from './electron-apps.js';
 import { probeCDP, resolveElectronEndpoint } from './launcher.js';
+import {
+  DEFAULT_BROWSER_WORKSPACE,
+  resolveBrowserTargetInSession,
+  resolveStoredBrowserTarget,
+} from './browser-target-state.js';
 
 const _loadedModules = new Map<string, Promise<void>>();
 /** Track mtime of loaded user adapter files for hot-reload in daemon mode. */
@@ -156,7 +161,7 @@ export async function executeCommand(
   cmd: CliCommand,
   rawKwargs: CommandArgs,
   debug: boolean = false,
-  opts: { prepared?: boolean } = {},
+  opts: { prepared?: boolean; browserTargetPage?: string; keepAlive?: boolean } = {},
 ): Promise<unknown> {
   let kwargs: CommandArgs;
   try {
@@ -178,6 +183,17 @@ export async function executeCommand(
   try {
     if (shouldUseBrowserSession(cmd)) {
       const electron = isElectronApp(cmd.site);
+      const explicitTargetPage = typeof opts.browserTargetPage === 'string' && opts.browserTargetPage.trim()
+        ? opts.browserTargetPage.trim()
+        : undefined;
+      if (electron && explicitTargetPage) {
+        throw new CommandExecutionError(
+          `Command ${fullName(cmd)} does not support tab targeting.`,
+          'Tab targeting is only available for Browser Bridge web adapters.',
+        );
+      }
+      const effectiveKeepAlive = !electron && (opts.keepAlive === true || !!explicitTargetPage);
+      const workspace = effectiveKeepAlive ? DEFAULT_BROWSER_WORKSPACE : `site:${cmd.site}`;
       let cdpEndpoint: string | undefined;
 
       if (electron) {
@@ -200,6 +216,28 @@ export async function executeCommand(
       ensureRequiredEnv(cmd);
       const BrowserFactory = getBrowserFactory(cmd.site);
       result = await browserSession(BrowserFactory, async (page) => {
+        const resolvedTargetPage = explicitTargetPage
+          ? await resolveBrowserTargetInSession(page, explicitTargetPage, {
+              scope: DEFAULT_BROWSER_WORKSPACE,
+              source: 'explicit',
+            })
+          : effectiveKeepAlive
+            ? await resolveStoredBrowserTarget(page, DEFAULT_BROWSER_WORKSPACE)
+            : undefined;
+        if (resolvedTargetPage) {
+          if (!page.setActivePage) {
+            throw new CommandExecutionError(
+              `Command ${fullName(cmd)} does not support explicit tab targeting.`,
+              'Update the Browser Bridge extension and try again.',
+            );
+          }
+          page.setActivePage(resolvedTargetPage);
+        }
+        const suppressNavigation = effectiveKeepAlive && !!resolvedTargetPage && typeof page.goto === 'function';
+        const originalGoto = suppressNavigation ? page.goto.bind(page) : undefined;
+        if (suppressNavigation) {
+          page.goto = async () => {};
+        }
         const preNavUrl = resolvePreNav(cmd);
         if (preNavUrl) {
           // Navigate directly — the extension's handleNavigate already has a fast-path
@@ -221,9 +259,11 @@ export async function executeCommand(
             timeout: cmd.timeoutSeconds ?? DEFAULT_BROWSER_COMMAND_TIMEOUT,
             label: fullName(cmd),
           });
-          // Adapter commands are one-shot — close the automation window immediately
-          // instead of waiting for the 30s idle timeout.
-          await page.closeWindow?.().catch(() => {});
+          if (!effectiveKeepAlive) {
+            // Adapter commands are one-shot — close the automation window immediately
+            // instead of waiting for the 30s idle timeout.
+            await page.closeWindow?.().catch(() => {});
+          }
           return result;
         } catch (err) {
           // Collect diagnostic while page is still alive (before closing the window).
@@ -233,13 +273,19 @@ export async function executeCommand(
             emitDiagnostic(ctx);
             diagnosticEmitted = true;
           }
-          // Close the automation window on failure too — without this, the window
-          // lingers until the extension's idle timer fires (unreliable on Windows
-          // where MV3 service workers may be suspended before setTimeout triggers).
-          await page.closeWindow?.().catch(() => {});
+          if (!effectiveKeepAlive) {
+            // Close the automation window on failure too — without this, the window
+            // lingers until the extension's idle timer fires (unreliable on Windows
+            // where MV3 service workers may be suspended before setTimeout triggers).
+            await page.closeWindow?.().catch(() => {});
+          }
           throw err;
+        } finally {
+          if (suppressNavigation && originalGoto) {
+            page.goto = originalGoto;
+          }
         }
-      }, { workspace: `site:${cmd.site}`, cdpEndpoint });
+      }, { workspace, cdpEndpoint });
     } else {
       // Non-browser commands: apply timeout only when explicitly configured.
       const timeout = cmd.timeoutSeconds;

@@ -293,6 +293,55 @@ describe('commanderAdapter default formats', () => {
   });
 });
 
+describe('commanderAdapter shared browser session options', () => {
+  const cmd: CliCommand = {
+    site: 'xiaohongshu',
+    name: 'top',
+    description: 'Read top notes',
+    browser: true,
+    args: [],
+    func: vi.fn(),
+  };
+
+  beforeEach(() => {
+    mockExecuteCommand.mockReset();
+    mockExecuteCommand.mockResolvedValue([]);
+    mockRenderOutput.mockReset();
+    delete process.env.OPENCLI_VERBOSE;
+    process.exitCode = undefined;
+  });
+
+  it('forwards --keep-alive as a runtime execution option', async () => {
+    const program = new Command();
+    const siteCmd = program.command('xiaohongshu');
+    registerCommandToProgram(siteCmd, cmd);
+
+    await program.parseAsync(['node', 'opencli', 'xiaohongshu', 'top', '--keep-alive']);
+
+    expect(mockExecuteCommand).toHaveBeenCalledWith(
+      cmd,
+      {},
+      false,
+      { prepared: true, keepAlive: true },
+    );
+  });
+
+  it('treats --tab as implicit keepAlive and forwards the target page', async () => {
+    const program = new Command();
+    const siteCmd = program.command('xiaohongshu');
+    registerCommandToProgram(siteCmd, cmd);
+
+    await program.parseAsync(['node', 'opencli', 'xiaohongshu', 'top', '--tab', 'tab-123']);
+
+    expect(mockExecuteCommand).toHaveBeenCalledWith(
+      cmd,
+      {},
+      false,
+      { prepared: true, browserTargetPage: 'tab-123', keepAlive: true },
+    );
+  });
+});
+
 describe('commanderAdapter error envelope output', () => {
   const cmd: CliCommand = {
     site: 'xiaohongshu',

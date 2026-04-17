@@ -25,9 +25,15 @@ import { TargetError } from './browser/target-errors.js';
 import { resolveTargetJs, getTextResolvedJs, getValueResolvedJs, getAttributesResolvedJs, selectResolvedJs, isAutocompleteResolvedJs } from './browser/target-resolver.js';
 import { daemonStatus, daemonStop } from './commands/daemon.js';
 import { log } from './logger.js';
+import {
+  DEFAULT_BROWSER_WORKSPACE,
+  loadBrowserTargetState,
+  resolveBrowserTargetInSession,
+  resolveStoredBrowserTarget,
+  saveBrowserTargetState,
+} from './browser-target-state.js';
 
 const CLI_FILE = fileURLToPath(import.meta.url);
-const DEFAULT_BROWSER_WORKSPACE = 'browser:default';
 const BROWSER_TAB_OPTION_DESCRIPTION = 'Target tab/page identity from "browser tab list"';
 
 type BrowserNetworkItem = {
@@ -37,15 +43,6 @@ type BrowserNetworkItem = {
   size: number;
   ct: string;
   body: unknown;
-};
-
-type BrowserTargetState = {
-  defaultPage?: string;
-  updatedAt: string;
-};
-
-type BrowserTabSummary = {
-  page?: string;
 };
 
 function getBrowserNetworkCacheDir(): string {
@@ -71,85 +68,6 @@ function saveBrowserNetworkCache(items: BrowserNetworkItem[], scope: string = DE
   const target = getBrowserNetworkCachePath(scope);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, JSON.stringify({ items, savedAt: new Date().toISOString() }), 'utf-8');
-}
-
-function getBrowserTargetStatePath(scope: string = DEFAULT_BROWSER_WORKSPACE): string {
-  const safeWorkspace = scope.replace(/[^a-zA-Z0-9_-]+/g, '_');
-  return path.join(getBrowserNetworkCacheDir(), 'browser-state', `${safeWorkspace}.json`);
-}
-
-function loadBrowserTargetState(scope: string = DEFAULT_BROWSER_WORKSPACE): BrowserTargetState | null {
-  try {
-    const raw = fs.readFileSync(getBrowserTargetStatePath(scope), 'utf-8');
-    const parsed = JSON.parse(raw) as BrowserTargetState | null;
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveBrowserTargetState(defaultPage?: string, scope: string = DEFAULT_BROWSER_WORKSPACE): void {
-  const target = getBrowserTargetStatePath(scope);
-  if (!defaultPage) {
-    fs.rmSync(target, { force: true });
-    return;
-  }
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, JSON.stringify({ defaultPage, updatedAt: new Date().toISOString() }), 'utf-8');
-}
-
-function hasBrowserTabTarget(tabs: unknown[], targetPage: string): boolean {
-  return tabs.some((tab) => {
-    return typeof tab === 'object'
-      && tab !== null
-      && 'page' in tab
-      && typeof (tab as BrowserTabSummary).page === 'string'
-      && (tab as BrowserTabSummary).page === targetPage;
-  });
-}
-
-async function resolveBrowserTargetInSession(
-  page: import('./types.js').IPage,
-  targetPage: string,
-  opts: { scope?: string; source: 'explicit' | 'saved' },
-): Promise<string | undefined> {
-  const candidate = targetPage.trim();
-  if (!candidate) return undefined;
-
-  let tabs: unknown[];
-  try {
-    tabs = await page.tabs();
-  } catch (err) {
-    if (opts.source === 'saved') {
-      saveBrowserTargetState(undefined, opts.scope);
-      return undefined;
-    }
-    throw new Error(
-      `Target tab ${candidate} could not be validated in the current browser session. ` +
-      'The Browser Bridge workspace may have restarted; re-run "opencli browser tab list" and choose a current target.',
-      { cause: err },
-    );
-  }
-
-  if (Array.isArray(tabs) && hasBrowserTabTarget(tabs, candidate)) {
-    return candidate;
-  }
-
-  if (opts.source === 'saved') {
-    saveBrowserTargetState(undefined, opts.scope);
-    return undefined;
-  }
-
-  throw new Error(
-    `Target tab ${candidate} is not part of the current browser session. ` +
-    'The Browser Bridge workspace may have restarted; re-run "opencli browser tab list" and choose a current target.',
-  );
-}
-
-async function resolveStoredBrowserTarget(page: import('./types.js').IPage, scope: string = DEFAULT_BROWSER_WORKSPACE): Promise<string | undefined> {
-  const defaultPage = loadBrowserTargetState(scope)?.defaultPage?.trim();
-  if (!defaultPage) return undefined;
-  return resolveBrowserTargetInSession(page, defaultPage, { scope, source: 'saved' });
 }
 
 /** Create a browser page for browser commands. Uses a dedicated browser workspace for session persistence. */
