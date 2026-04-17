@@ -1,0 +1,1685 @@
+import { CommandExecutionError, EmptyResultError } from '@jackwener/opencli/errors';
+import { cli, Strategy } from '@jackwener/opencli/registry';
+import {
+    CURRENT_LIVE_URL,
+    DEFAULT_AGG_CARD_ID,
+    clean,
+    ensureEosSession,
+    fetchCurrentAnchorShelves,
+    getCurrentLiveStatus,
+    parsePositiveInt,
+    resolveShelfCardByRank,
+} from './shared.js';
+
+const LIMIT_PER_USER = 99;
+const DEPLOY_MODE_TEXT = '立即投放';
+const DURATION_TEXT = '60分钟';
+const SECKILL_UI_TIMEOUT_MS = 20_000;
+const SECKILL_SUBMIT_TIMEOUT_MS = 20_000;
+
+function buildSeckillResultRow(rank, card, deployStock, action, message, extra = {}) {
+    const cardBase = card?.card_base_info ?? {};
+    const productBase = card?.product_base_info ?? {};
+    return {
+        status: 'success',
+        action,
+        rank,
+        title: clean(productBase.name),
+        product_id: clean(productBase.product_id),
+        card_id: clean(cardBase.card_id || card?.card_id),
+        deploy_stock: deployStock,
+        limit_per_user: LIMIT_PER_USER,
+        duration: DURATION_TEXT,
+        activity_id: clean(extra.activityId),
+        message,
+    };
+}
+
+function assertCardCanSeckill(card, deployStock) {
+    const stockNum = Number(card?.stock_info?.stock_num);
+    if (Number.isFinite(stockNum) && stockNum <= 0) {
+        throw new CommandExecutionError('EOS seckill requires an in-stock product', '仅可对有库存的商品投放秒杀。');
+    }
+    if (Number.isFinite(stockNum) && deployStock > stockNum) {
+        throw new CommandExecutionError(`EOS seckill stock ${deployStock} exceeds available stock ${stockNum}`, '投放库存不能大于当前商品可用库存。');
+    }
+}
+
+async function evaluateWithArgs(page, js, args) {
+    if (typeof page.evaluateWithArgs === 'function') {
+        return page.evaluateWithArgs(js, args);
+    }
+    const declarations = Object.entries(args)
+        .map(([key, value]) => `const ${key} = ${JSON.stringify(value)};`)
+        .join('\n');
+    return page.evaluate(`(async () => {\n${declarations}\nreturn await (${js});\n})()`);
+}
+
+function buildSeckillUiAutomationJs() {
+    return `
+      (async () => {
+        const SAVE_URL_PART = '/aweme/v2/namek/merchant/marketing/discount/activity/save';
+        const FRAME_URL_PATTERN = /\\/life_marketing\\/drop-spike/;
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const cleanText = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim();
+        const normalizeText = (value) => cleanText(value).replace(/\\s+/g, '');
+        const now = () => Date.now();
+        const debug = [];
+        const stageName = cleanText(typeof stage === 'string' ? stage : 'full') || 'full';
+
+        function log(message) {
+          debug.push(cleanText(message).slice(0, 240));
+        }
+
+        function isElementNode(element) {
+          return Boolean(element && element.nodeType === 1);
+        }
+
+        function getElementView(element) {
+          return element?.ownerDocument?.defaultView || window;
+        }
+
+        function isVisible(element) {
+          if (!isElementNode(element)) {
+            return false;
+          }
+          const style = getElementView(element)?.getComputedStyle?.(element);
+          if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            return false;
+          }
+          const rect = element.getBoundingClientRect?.();
+          return Boolean(element.getClientRects?.().length || rect?.width || rect?.height || element.scrollWidth || element.scrollHeight);
+        }
+
+        function textOf(element) {
+          return cleanText(element?.innerText || element?.textContent || '');
+        }
+
+        function normalizedElementText(element) {
+          return normalizeText(textOf(element));
+        }
+
+        function isLikelyClickable(element) {
+          if (!isElementNode(element)) {
+            return false;
+          }
+          if (element.matches('button, [role="button"], label, a, input[type="radio"], input[type="checkbox"]')) {
+            return true;
+          }
+          const tabIndex = Number(element.getAttribute('tabindex'));
+          if (Number.isInteger(tabIndex) && tabIndex >= 0) {
+            return true;
+          }
+          const classText = cleanText(element.className);
+          if (/(btn|button|radio|checkbox|option|select|item|tab|trigger)/i.test(classText)) {
+            return true;
+          }
+          const style = getElementView(element)?.getComputedStyle?.(element);
+          return style?.cursor === 'pointer';
+        }
+
+        function clickableTarget(element) {
+          let current = element;
+          for (let depth = 0; current && depth < 6; depth += 1) {
+            if (isLikelyClickable(current)) {
+              return current;
+            }
+            current = current.parentElement;
+          }
+          return element;
+        }
+
+        function clickElement(element) {
+          const target = clickableTarget(element);
+          if (!target) {
+            return null;
+          }
+          target.scrollIntoView?.({ block: 'center', inline: 'center' });
+          const view = getElementView(target);
+          const options = { bubbles: true, cancelable: true, composed: true, view };
+          try {
+            target.focus?.({ preventScroll: true });
+          } catch {}
+          try {
+            target.click?.();
+            return target;
+          } catch {}
+          try {
+            target.dispatchEvent(new view.MouseEvent('click', options));
+            return target;
+          } catch {}
+          try { target.dispatchEvent(new view.MouseEvent('mousedown', options)); } catch {}
+          try { target.dispatchEvent(new view.MouseEvent('mouseup', options)); } catch {}
+          try { target.dispatchEvent(new view.MouseEvent('click', options)); } catch {}
+          return target;
+        }
+
+        function findCardRoot() {
+          const roots = Array.from(document.querySelectorAll('#live-card-list [aria-label]'));
+          return roots.find((root) => {
+            const aria = cleanText(root.getAttribute('aria-label'));
+            return aria.split('-')[2] === String(cardId);
+          }) || null;
+        }
+
+        function findCardContainer(element) {
+          let current = element;
+          for (let depth = 0; current && depth < 12; depth += 1) {
+            const aria = cleanText(current?.getAttribute?.('aria-label'));
+            if (aria) {
+              return current;
+            }
+            current = current.parentElement;
+          }
+          return null;
+        }
+
+        function findSeckillButton(cardRoot) {
+          const direct = cardRoot?.querySelector('[class^="seckill-btn-container-"], [class*="seckill-btn-container-"]');
+          if (direct) {
+            return direct;
+          }
+          const buttons = Array.from(document.querySelectorAll('[class^="seckill-btn-container-"], [class*="seckill-btn-container-"]'));
+          return buttons.find((button) => {
+            const container = findCardContainer(button);
+            const aria = cleanText(container?.getAttribute?.('aria-label'));
+            return aria.split('-')[2] === String(cardId);
+          }) || null;
+        }
+
+        function scoreTextCandidate(element, expectedText) {
+          if (!isVisible(element)) {
+            return -1;
+          }
+          const text = normalizedElementText(element);
+          const expected = normalizeText(expectedText);
+          if (!text || !text.includes(expected)) {
+            return -1;
+          }
+          let score = 0;
+          if (text === expected) {
+            score += 240;
+          }
+          if (text.startsWith(expected) || text.endsWith(expected)) {
+            score += 20;
+          }
+          if (isLikelyClickable(element)) {
+            score += 60;
+          }
+          if (element.matches('button, label, span')) {
+            score += 60;
+          }
+          if (element.children.length === 0) {
+            score += 30;
+          }
+          if (element.tagName === 'HTML' || element.tagName === 'BODY') {
+            score -= 400;
+          }
+          for (const child of Array.from(element.children)) {
+            if (normalizedElementText(child) === text) {
+              score -= 120;
+              break;
+            }
+          }
+          score -= Math.min(text.length, 160);
+          return score;
+        }
+
+        function collectTextMatches(root, expectedText, selector = 'button, label, span, div', options = {}) {
+          const elements = Array.from(root.querySelectorAll(selector));
+          const ranked = elements
+            .map((element) => {
+              const score = scoreTextCandidate(element, expectedText);
+              if (score < 0) {
+                return null;
+              }
+              if (options.allowDisabled === false && element.matches(':disabled, [aria-disabled="true"]')) {
+                return null;
+              }
+              return { element, score };
+            })
+            .filter(Boolean)
+            .sort((left, right) => right.score - left.score);
+          return ranked.map((item) => item.element);
+        }
+
+        function findActionByText(root, expectedText, selector = 'button, label, span, div', options = {}) {
+          return collectTextMatches(root, expectedText, selector, options)[0] || null;
+        }
+
+        function getDropSpikeFrames() {
+          return Array.from(document.querySelectorAll('iframe'))
+            .filter((frame) => FRAME_URL_PATTERN.test(frame.src || ''))
+            .map((frame, index) => {
+              try {
+                const win = frame.contentWindow;
+                const doc = win?.document;
+                if (!doc?.body) {
+                  return null;
+                }
+                return {
+                  index,
+                  frame,
+                  win,
+                  doc,
+                  text: textOf(doc.body),
+                  normalizedText: normalizeText(doc.body.innerText || doc.body.textContent || ''),
+                  visible: isVisible(frame),
+                };
+              } catch {
+                return null;
+              }
+            })
+            .filter(Boolean);
+        }
+
+        function scoreFrameInfo(frameInfo) {
+          return (frameInfo.visible ? 1000 : 0)
+            + (frameInfo.normalizedText.includes(normalizeText('投放秒杀')) ? 200 : 0)
+            + (frameInfo.normalizedText.includes(normalizeText('投放库存')) ? 80 : 0)
+            + (frameInfo.normalizedText.includes(normalizeText('每人限购')) ? 80 : 0)
+            + (frameInfo.normalizedText.includes(normalizeText(submitText)) ? 80 : 0)
+            - frameInfo.index;
+        }
+
+        function rankFrameInfos(frameInfos) {
+          return [...frameInfos].sort((left, right) => scoreFrameInfo(right) - scoreFrameInfo(left));
+        }
+
+        function pickFrame() {
+          return rankFrameInfos(getDropSpikeFrames())[0] || null;
+        }
+
+        function pickFrameSince(minIndex = -1) {
+          return rankFrameInfos(getDropSpikeFrames().filter((item) => item.index > minIndex))[0] || null;
+        }
+
+        function getPopupMaxIndex() {
+          return getDropSpikeFrames().reduce((max, item) => Math.max(max, item.index), -1);
+        }
+
+        function getFrameState(frameInfo) {
+          if (!frameInfo?.doc?.body) {
+            return null;
+          }
+          const text = textOf(frameInfo.doc.body);
+          return {
+            text,
+            normalizedText: normalizeText(text),
+          };
+        }
+
+        function frameHasText(frameInfo, expectedText) {
+          const state = getFrameState(frameInfo);
+          return Boolean(state?.normalizedText.includes(normalizeText(expectedText)));
+        }
+
+        function isSeckillPopupFrame(frameInfo) {
+          if (!frameInfo?.doc?.body) {
+            return false;
+          }
+          return frameHasText(frameInfo, '投放秒杀')
+            || frameHasText(frameInfo, submitText)
+            || (frameHasText(frameInfo, '投放库存') && frameHasText(frameInfo, '每人限购'));
+        }
+
+        function listPopupFrames(minIndex = -1) {
+          return rankFrameInfos(
+            getDropSpikeFrames().filter((item) => item.index > minIndex && isSeckillPopupFrame(item))
+          );
+        }
+
+        function isFrameAlive(frameInfo) {
+          try {
+            return Boolean(frameInfo?.doc?.body && frameInfo.frame?.isConnected !== false);
+          } catch {
+            return false;
+          }
+        }
+
+        function visibleModalByText(root, expectedText) {
+          return Array.from(root.querySelectorAll('div'))
+            .find((element) => isVisible(element) && normalizedElementText(element).includes(normalizeText(expectedText))) || null;
+        }
+
+        async function dismissSeckillFrame(frameInfo) {
+          if (!frameInfo?.doc?.body) {
+            return true;
+          }
+          const visibleMasks = Array.from(document.querySelectorAll('div.okee-main-drawer-mask'))
+            .filter((element) => isVisible(element));
+          const topMask = visibleMasks[visibleMasks.length - 1];
+          if (topMask) {
+            clickElement(topMask);
+            await wait(250);
+            const maskDeadline = now() + 1200;
+            while (now() < maskDeadline) {
+              if (!isFrameAlive(frameInfo)) {
+                return true;
+              }
+              await wait(120);
+            }
+          }
+          const confirmModal = visibleModalByText(frameInfo.doc, '取消提示');
+          if (confirmModal) {
+            const confirmButton = findActionByText(confirmModal, '确定', 'button, span, div');
+            if (confirmButton) {
+              clickElement(confirmButton);
+              await wait(300);
+            }
+          } else {
+            const cancelButton = findActionByText(frameInfo.doc, '取消', 'button', { allowDisabled: false })
+              || findActionByText(frameInfo.doc, '取消', 'button, span, div');
+            if (!cancelButton) {
+              return false;
+            }
+            clickElement(cancelButton);
+            await wait(250);
+            const nextModal = visibleModalByText(frameInfo.doc, '取消提示');
+            if (nextModal) {
+              const confirmButton = findActionByText(nextModal, '确定', 'button, span, div');
+              if (confirmButton) {
+                clickElement(confirmButton);
+                await wait(300);
+              }
+            }
+          }
+
+          const deadline = now() + 2000;
+          while (now() < deadline) {
+            if (!isFrameAlive(frameInfo)) {
+              return true;
+            }
+            await wait(120);
+          }
+          const remainingMasks = Array.from(document.querySelectorAll('div.okee-main-drawer-mask'))
+            .filter((element) => isVisible(element));
+          const mask = remainingMasks[remainingMasks.length - 1];
+          if (mask) {
+            clickElement(mask);
+            await wait(250);
+          }
+          const maskDeadline = now() + 1500;
+          while (now() < maskDeadline) {
+            if (!isFrameAlive(frameInfo)) {
+              return true;
+            }
+            await wait(120);
+          }
+          return !isFrameAlive(frameInfo);
+        }
+
+        async function dismissExistingSeckillFrames() {
+          const deadline = now() + uiTimeoutMs;
+          while (now() < deadline) {
+            const frames = getDropSpikeFrames();
+            if (frames.length === 0) {
+              return;
+            }
+            const target = frames[frames.length - 1];
+            const dismissed = await dismissSeckillFrame(target);
+            if (!dismissed) {
+              break;
+            }
+            await wait(150);
+          }
+          const staleFrames = getDropSpikeFrames();
+          if (staleFrames.length === 0) {
+            return;
+          }
+          hideFrameInfos(staleFrames);
+          hideVisibleMasks();
+        }
+
+        function hideFrameInfos(frameInfos, activeFrameInfo = null) {
+          for (const frameInfo of frameInfos) {
+            if (frameInfo.frame === activeFrameInfo?.frame) {
+              continue;
+            }
+            try {
+              frameInfo.frame.style.display = 'none';
+              frameInfo.frame.style.pointerEvents = 'none';
+            } catch {}
+            try {
+              if (frameInfo.frame.parentElement) {
+                frameInfo.frame.parentElement.style.display = 'none';
+                frameInfo.frame.parentElement.style.pointerEvents = 'none';
+              }
+            } catch {}
+            try {
+              if (frameInfo.frame.parentElement?.parentElement) {
+                frameInfo.frame.parentElement.parentElement.style.display = 'none';
+                frameInfo.frame.parentElement.parentElement.style.pointerEvents = 'none';
+              }
+            } catch {}
+          }
+        }
+
+        function hideVisibleMasks(keepLastCount = 0) {
+          const visibleMasks = Array.from(document.querySelectorAll('div.okee-main-drawer-mask'))
+            .filter((element) => isVisible(element));
+          const masksToHide = keepLastCount > 0 ? visibleMasks.slice(0, -keepLastCount) : visibleMasks;
+          for (const mask of masksToHide) {
+            try {
+              mask.style.display = 'none';
+              mask.style.pointerEvents = 'none';
+            } catch {}
+          }
+        }
+
+        function isolatePopupFrame(activeFrameInfo) {
+          hideFrameInfos(getDropSpikeFrames(), activeFrameInfo);
+          hideVisibleMasks(1);
+        }
+
+        function installSaveCapture(win) {
+          if (!win || win.__opencliSeckillSaveInstalled) {
+            return;
+          }
+          const captureKey = '__opencliSeckillSaveRecords';
+          win.__opencliSeckillSaveInstalled = true;
+          win[captureKey] = Array.isArray(win[captureKey]) ? win[captureKey] : [];
+
+          const normalizeBody = (body) => {
+            if (body == null) {
+              return null;
+            }
+            if (typeof body === 'string') {
+              return body;
+            }
+            if (typeof win.URLSearchParams !== 'undefined' && body instanceof win.URLSearchParams) {
+              return body.toString();
+            }
+            if (typeof win.FormData !== 'undefined' && body instanceof win.FormData) {
+              return Array.from(body.entries());
+            }
+            try {
+              return JSON.stringify(body);
+            } catch {
+              return String(body);
+            }
+          };
+
+          try {
+            const originalFetch = win.fetch?.bind(win);
+            if (originalFetch) {
+              win.fetch = async (...args) => {
+                const [input, init] = args;
+                const rawUrl = typeof input === 'string' ? input : (input?.url || '');
+                const method = cleanText(init?.method || (typeof input !== 'string' ? input?.method : '') || 'GET').toUpperCase();
+                const response = await originalFetch(...args);
+                if (rawUrl.includes(SAVE_URL_PART)) {
+                  const record = {
+                    transport: 'fetch',
+                    url: rawUrl,
+                    method,
+                    requestBody: normalizeBody(init?.body),
+                    status: response.status,
+                    response: null,
+                  };
+                  try {
+                    const cloned = response.clone();
+                    const text = await cloned.text();
+                    try {
+                      record.response = JSON.parse(text);
+                    } catch {
+                      record.response = text;
+                    }
+                  } catch {}
+                  win[captureKey].push(record);
+                }
+                return response;
+              };
+            }
+          } catch {}
+
+          try {
+            const xhrProto = win.XMLHttpRequest?.prototype;
+            if (xhrProto && !xhrProto.__opencliSeckillSaveInstalled) {
+              const originalOpen = xhrProto.open;
+              const originalSend = xhrProto.send;
+              xhrProto.__opencliSeckillSaveInstalled = true;
+              xhrProto.open = function(method, url, ...rest) {
+                this.__opencliSeckillSaveMeta = {
+                  method: cleanText(method || 'GET').toUpperCase(),
+                  url: typeof url === 'string' ? url : String(url || ''),
+                };
+                return originalOpen.call(this, method, url, ...rest);
+              };
+              xhrProto.send = function(body) {
+                const meta = this.__opencliSeckillSaveMeta || {};
+                meta.requestBody = normalizeBody(body);
+                this.__opencliSeckillSaveMeta = meta;
+                this.addEventListener('loadend', function() {
+                  const current = this.__opencliSeckillSaveMeta || {};
+                  if (!String(current.url || '').includes(SAVE_URL_PART)) {
+                    return;
+                  }
+                  const record = {
+                    transport: 'xhr',
+                    url: current.url,
+                    method: current.method || 'POST',
+                    requestBody: current.requestBody ?? null,
+                    status: this.status,
+                    response: null,
+                  };
+                  const text = this.responseText;
+                  if (typeof text === 'string' && text) {
+                    try {
+                      record.response = JSON.parse(text);
+                    } catch {
+                      record.response = text;
+                    }
+                  }
+                  win[captureKey].push(record);
+                }, { once: true });
+                return originalSend.call(this, body);
+              };
+            }
+          } catch {}
+        }
+
+        function readCapture(win) {
+          return Array.isArray(win?.__opencliSeckillSaveRecords) ? win.__opencliSeckillSaveRecords : [];
+        }
+
+        function installCaptureOnAllFrames(frameInfos) {
+          installSaveCapture(window);
+          for (const frameInfo of frameInfos) {
+            installSaveCapture(frameInfo?.win);
+          }
+        }
+
+        function readAllCaptures(frameInfos) {
+          const records = [...readCapture(window)];
+          for (const frameInfo of frameInfos) {
+            records.push(...readCapture(frameInfo?.win));
+          }
+          return records;
+        }
+
+        function isEditableInput(element) {
+          if (!isElementNode(element) || !isVisible(element)) {
+            return false;
+          }
+          if (element.matches('input[type="hidden"], input[disabled], textarea[disabled]')) {
+            return false;
+          }
+          return element.matches('input, textarea');
+        }
+
+        function findFormContainer(root, labelText) {
+          return Array.from(root.querySelectorAll('.byted-form-container')).find((container) => {
+            const label = container.querySelector('.byted-form-container-label');
+            return normalizeText(textOf(label)) === normalizeText(labelText);
+          }) || null;
+        }
+
+        function findRadioOption(root, groupLabel, optionText) {
+          const container = findFormContainer(root, groupLabel);
+          return Array.from(container?.querySelectorAll('label') || []).find((label) => {
+            return normalizeText(textOf(label)) === normalizeText(optionText);
+          }) || null;
+        }
+
+        function findRadioOptionAnywhere(root, optionText) {
+          return Array.from(root.querySelectorAll('label.byted-radio, label[class*="byted-radio"], label'))
+            .find((label) => isVisible(label) && normalizeText(textOf(label)).includes(normalizeText(optionText))) || null;
+        }
+
+        function isOptionSelected(option) {
+          if (!isElementNode(option)) {
+            return false;
+          }
+          const input = option.matches('input') ? option : option.querySelector?.('input[type="radio"], input[type="checkbox"]');
+          if (Boolean(input?.checked || input?.hasAttribute?.('checked') || input?.getAttribute?.('aria-checked') === 'true')) {
+            return true;
+          }
+          if (option.getAttribute?.('aria-checked') === 'true') {
+            return true;
+          }
+          const classTokens = String(option.className || '')
+            .split(/\s+/)
+            .map((token) => token.trim())
+            .filter(Boolean);
+          return classTokens.some((token) => /(^|-)checked($|-)/i.test(token));
+        }
+
+        function isDurationGroup(element) {
+          const text = normalizedElementText(element);
+          return text.includes(normalizeText('10分钟'))
+            && text.includes(normalizeText('30分钟'))
+            && text.includes(normalizeText('60分钟'))
+            && text.includes(normalizeText('自定义'));
+        }
+
+        function findDurationGroup(root) {
+          const groups = Array.from(root.querySelectorAll('div, form'))
+            .filter((element) => isVisible(element) && isDurationGroup(element))
+            .map((element) => ({
+              element,
+              score: (isLikelyClickable(element) ? 40 : 0) - normalizedElementText(element).length,
+            }))
+            .sort((left, right) => right.score - left.score);
+          return groups[0]?.element || null;
+        }
+
+        function collectDurationOptionCandidates(root, optionText) {
+          const expected = normalizeText(optionText);
+          const scope = findDurationGroup(root) || root;
+          return Array.from(scope.querySelectorAll('span, label, button, div'))
+            .filter((element) => isVisible(element) && normalizedElementText(element) === expected)
+            .map((element) => {
+              let score = 0;
+              if (isLikelyClickable(element)) {
+                score += 80;
+              }
+              if (element.children.length === 0) {
+                score += 40;
+              }
+              if (['SPAN', 'LABEL', 'BUTTON'].includes(element.tagName)) {
+                score += 20;
+              }
+              if (isDurationGroup(element.parentElement)) {
+                score += 40;
+              }
+              score -= normalizedElementText(element.parentElement).length;
+              return { element, score };
+            })
+            .sort((left, right) => right.score - left.score)
+            .map((item) => item.element);
+        }
+
+        function findDurationOption(root, optionText) {
+          return collectDurationOptionCandidates(root, optionText)[0] || null;
+        }
+
+        function isDurationOptionSelected(node) {
+          let current = node;
+          for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+            const classText = cleanText(current.className);
+            if (classText.includes('A8JtJ7tE_RHCfk3KkkLW')) {
+              return true;
+            }
+          }
+          return false;
+        }
+
+        function getSeckillNumberInputs(root) {
+          return Array.from(root.querySelectorAll('input.byted-input-number-input')).filter(isEditableInput);
+        }
+
+        function getSeckillFormSnapshot(root) {
+          const submit = Array.from(root.querySelectorAll('button'))
+            .filter(isVisible)
+            .find((element) => normalizedElementText(element).includes(normalizeText(submitText)));
+          const radios = Array.from(root.querySelectorAll('label.byted-radio, label[class*="byted-radio"]'))
+            .filter(isVisible)
+            .map((element) => ({
+              text: cleanText(textOf(element)),
+              checked: isOptionSelected(element),
+            }))
+            .filter((item) => item.text);
+          const duration = Array.from(root.querySelectorAll('span'))
+            .filter(isVisible)
+            .map((element) => ({
+              text: cleanText(textOf(element)),
+              selected: isDurationOptionSelected(element),
+            }))
+            .filter((item) => ['10分钟', '30分钟', '60分钟', '自定义'].includes(item.text));
+          const inputs = getSeckillNumberInputs(root).map((element, index) => ({
+            idx: index,
+            value: cleanText(element.value),
+          }));
+          const deployStockInput = findInputByLabel(root, '投放库存');
+          const limitPerUserInput = findInputByLabel(root, '每人限购');
+          const customDurationInput = findInputByLabel(root, '自定义时长');
+          const errors = Array.from(root.querySelectorAll('*'))
+            .filter(isVisible)
+            .map((element) => cleanText(textOf(element)))
+            .filter((text) => text && /必填|错误|请输入|不能|至少|至多|失效|不可/.test(text))
+            .slice(0, 12);
+          return {
+            submit: submit ? {
+              text: cleanText(textOf(submit)),
+              disabled: Boolean(submit.disabled),
+              className: cleanText(submit.className),
+            } : null,
+            radios,
+            duration,
+            inputs,
+            fields: {
+              deployStock: cleanText(deployStockInput?.value),
+              limitPerUser: cleanText(limitPerUserInput?.value),
+              customDuration: cleanText(customDurationInput?.value),
+              customDurationVisible: isEditableInput(customDurationInput),
+            },
+            errors,
+          };
+        }
+
+        function snapshotRadioChecked(snapshot, text) {
+          const radios = Array.isArray(snapshot?.radios) ? snapshot.radios : [];
+          return radios.some((item) => cleanText(item?.text) === cleanText(text) && Boolean(item?.checked));
+        }
+
+        function snapshotHasDuration(snapshot, text) {
+          const duration = Array.isArray(snapshot?.duration) ? snapshot.duration : [];
+          return duration.some((item) => cleanText(item?.text) === cleanText(text));
+        }
+
+        function snapshotDurationSelected(snapshot, text) {
+          const duration = Array.isArray(snapshot?.duration) ? snapshot.duration : [];
+          return duration.some((item) => cleanText(item?.text) === cleanText(text) && Boolean(item?.selected));
+        }
+
+        function snapshotInputsReady(snapshot) {
+          return Array.isArray(snapshot?.inputs) && snapshot.inputs.length >= 2;
+        }
+
+        function snapshotInputValue(snapshot, index) {
+          const item = Array.isArray(snapshot?.inputs) ? snapshot.inputs.find((entry) => Number(entry?.idx) === index) : null;
+          return cleanText(item?.value);
+        }
+
+        function snapshotFieldValue(snapshot, name) {
+          return cleanText(snapshot?.fields?.[name]);
+        }
+
+        function snapshotCustomDurationVisible(snapshot) {
+          return Boolean(snapshot?.fields?.customDurationVisible);
+        }
+
+        function snapshotDurationReady(snapshot, text) {
+          if (!snapshotDurationSelected(snapshot, text)) {
+            return false;
+          }
+          if (cleanText(text) !== '自定义' && snapshotDurationSelected(snapshot, '自定义')) {
+            return false;
+          }
+          if (cleanText(text) !== '自定义' && snapshotCustomDurationVisible(snapshot)) {
+            return false;
+          }
+          return true;
+        }
+
+        function snapshotFieldKeyForLabel(labelText) {
+          const normalized = normalizeText(labelText);
+          if (normalized === normalizeText('投放库存')) {
+            return 'deployStock';
+          }
+          if (normalized === normalizeText('每人限购')) {
+            return 'limitPerUser';
+          }
+          if (normalized === normalizeText('自定义时长')) {
+            return 'customDuration';
+          }
+          return '';
+        }
+
+        function snapshotInputMatches(snapshot, index, labelText, value) {
+          const expected = String(value);
+          const fieldKey = snapshotFieldKeyForLabel(labelText);
+          if (fieldKey && snapshotFieldValue(snapshot, fieldKey) === expected) {
+            return true;
+          }
+          return snapshotInputValue(snapshot, index) === expected;
+        }
+
+        function hasVisibleText(root, expectedText, selector = 'label, span, div, button, input, p') {
+          const expected = normalizeText(expectedText);
+          return Array.from(root.querySelectorAll(selector)).some((element) => {
+            if (!isVisible(element)) {
+              return false;
+            }
+            const text = element.matches('input')
+              ? cleanText(element.value || element.placeholder || '')
+              : textOf(element);
+            return normalizeText(text).includes(expected);
+          });
+        }
+
+        function hasImmediateDuration(frameInfo) {
+          return Boolean(findDurationOption(frameInfo?.doc || frameInfo, durationText));
+        }
+
+        function immediateModeReady(frameInfo, snapshot = null) {
+          const currentSnapshot = snapshot || getSeckillFormSnapshot(frameInfo.doc);
+          return snapshotRadioChecked(currentSnapshot, modeText)
+            && hasImmediateDuration(frameInfo)
+            && snapshotInputsReady(currentSnapshot);
+        }
+
+        function isRadioOptionChecked(root, groupLabel, optionText) {
+          const option = findRadioOption(root, groupLabel, optionText) || findRadioOptionAnywhere(root, optionText);
+          return isOptionSelected(option);
+        }
+
+        function forceRadioSelection(root, groupLabel, optionText) {
+          const container = findFormContainer(root, groupLabel);
+          const labels = Array.from(container?.querySelectorAll('label') || [])
+            .filter((label) => isVisible(label) && normalizeText(textOf(label)).length > 0);
+          const targetLabel = labels.find((label) => normalizeText(textOf(label)).includes(normalizeText(optionText)))
+            || findRadioOption(root, groupLabel, optionText)
+            || findRadioOptionAnywhere(root, optionText);
+          if (!targetLabel) {
+            return false;
+          }
+          const view = getElementView(targetLabel);
+          const checkedDescriptor = Object.getOwnPropertyDescriptor(view?.HTMLInputElement?.prototype || {}, 'checked');
+          for (const label of labels) {
+            const input = label.querySelector?.('input[type="radio"], input[type="checkbox"]');
+            if (!input) {
+              continue;
+            }
+            const shouldCheck = label === targetLabel;
+            try {
+              if (checkedDescriptor?.set) {
+                checkedDescriptor.set.call(input, shouldCheck);
+              } else {
+                input.checked = shouldCheck;
+              }
+            } catch {}
+            try {
+              input.dispatchEvent(new view.Event('input', { bubbles: true }));
+            } catch {}
+            try {
+              input.dispatchEvent(new view.Event('change', { bubbles: true }));
+            } catch {}
+          }
+          const targetInput = targetLabel.querySelector?.('input[type="radio"], input[type="checkbox"]');
+          if (targetInput) {
+            clickElement(targetInput);
+            try { targetInput.click?.(); } catch {}
+          }
+          clickElement(targetLabel);
+          if (targetLabel.parentElement) {
+            clickElement(targetLabel.parentElement);
+          }
+          return true;
+        }
+
+        function forceDurationSelection(root, optionText) {
+          const candidates = collectDurationOptionCandidates(root, optionText);
+          for (const candidate of candidates) {
+            const targets = [];
+            let current = candidate;
+            for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+              if (!targets.includes(current)) {
+                targets.push(current);
+              }
+            }
+            const clickable = clickableTarget(candidate);
+            if (clickable && !targets.includes(clickable)) {
+              targets.splice(1, 0, clickable);
+            }
+            for (const target of targets) {
+              clickElement(target);
+              if (snapshotDurationReady(getSeckillFormSnapshot(root), optionText)) {
+                return true;
+              }
+            }
+          }
+          return false;
+        }
+
+        async function ensureRadioSelected(frameInfo, groupLabel, optionText, timeoutMs) {
+          const deadline = now() + timeoutMs;
+          let lastSnapshot = null;
+          while (now() < deadline) {
+            const snapshot = getSeckillFormSnapshot(frameInfo.doc);
+            lastSnapshot = snapshot;
+            if (isRadioOptionChecked(frameInfo.doc, groupLabel, optionText)) {
+              return snapshot;
+            }
+            forceRadioSelection(frameInfo.doc, groupLabel, optionText);
+            await wait(120);
+          }
+          throw new Error('未能选中单选项: ' + optionText + ' ' + JSON.stringify(lastSnapshot));
+        }
+
+        async function waitForSeckillFormStable(frameInfo, timeoutMs) {
+          const deadline = now() + timeoutMs;
+          let stableHits = 0;
+          let lastSignature = null;
+          let lastSnapshot = null;
+          while (now() < deadline) {
+            const snapshot = getSeckillFormSnapshot(frameInfo.doc);
+            lastSnapshot = snapshot;
+            const signature = JSON.stringify({
+              immediate: snapshotRadioChecked(snapshot, '立即投放'),
+              scheduled: snapshotRadioChecked(snapshot, '定时投放'),
+              durationPresent: snapshotHasDuration(snapshot, durationText),
+              inputs: (snapshot.inputs || []).slice(0, 2).map((item) => cleanText(item?.value)),
+            });
+            if (snapshotInputsReady(snapshot) && signature === lastSignature) {
+              stableHits += 1;
+              if (stableHits >= 2) {
+                return snapshot;
+              }
+            } else {
+              stableHits = snapshotInputsReady(snapshot) ? 1 : 0;
+              lastSignature = snapshotInputsReady(snapshot) ? signature : null;
+            }
+            await wait(180);
+          }
+          throw new Error('秒杀表单未稳定: ' + JSON.stringify(lastSnapshot));
+        }
+
+        async function waitForSeckillImmediateReady(frameInfo, timeoutMs) {
+          const deadline = now() + timeoutMs;
+          let stableHits = 0;
+          let lastSnapshot = null;
+          while (now() < deadline) {
+            const snapshot = getSeckillFormSnapshot(frameInfo.doc);
+            lastSnapshot = snapshot;
+            if (immediateModeReady(frameInfo, snapshot)) {
+              stableHits += 1;
+              if (stableHits >= 2) {
+                return snapshot;
+              }
+            } else {
+              stableHits = 0;
+              forceRadioSelection(frameInfo.doc, '投放方式', modeText);
+            }
+            await wait(180);
+          }
+          throw new Error('立即投放模式未就绪: ' + JSON.stringify(lastSnapshot));
+        }
+
+        async function ensureDurationSelected(frameInfo, optionText, timeoutMs) {
+          const deadline = now() + timeoutMs;
+          let lastSnapshot = null;
+          while (now() < deadline) {
+            const snapshot = getSeckillFormSnapshot(frameInfo.doc);
+            lastSnapshot = snapshot;
+            if (snapshotDurationReady(snapshot, optionText)) {
+              return snapshot;
+            }
+            forceDurationSelection(frameInfo.doc, optionText);
+            await wait(120);
+          }
+          throw new Error('未能选中投放时长: ' + JSON.stringify(lastSnapshot));
+        }
+
+        function findInputByLabel(root, labelText) {
+          const formContainer = findFormContainer(root, labelText);
+          const directInput = formContainer?.querySelector('input.byted-input-number-input, textarea, input');
+          if (isEditableInput(directInput)) {
+            return directInput;
+          }
+          const labels = Array.from(root.querySelectorAll('label'))
+            .filter((label) => isVisible(label) && normalizeText(textOf(label)) === normalizeText(labelText));
+          for (const label of labels) {
+            const container = label.closest('.byted-form-container') || label.parentElement;
+            const preciseInput = container?.querySelector('input.byted-input-number-input, textarea, input');
+            if (isEditableInput(preciseInput)) {
+              return preciseInput;
+            }
+          }
+          const candidates = collectTextMatches(root, labelText, 'label, span, div');
+          for (const label of candidates) {
+            let current = label;
+            for (let depth = 0; current && depth < 8; depth += 1) {
+              const inputs = Array.from(current.querySelectorAll('input.byted-input-number-input, input, textarea')).filter(isEditableInput);
+              if (inputs.length > 0) {
+                return inputs[0];
+              }
+              current = current.parentElement;
+            }
+          }
+          return null;
+        }
+
+        async function setInputValue(input, value) {
+          if (!input) {
+            return false;
+          }
+          const nextValue = String(value);
+          const view = getElementView(input);
+          const proto = Object.getPrototypeOf(input);
+          const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+            || Object.getOwnPropertyDescriptor(view?.HTMLInputElement?.prototype || {}, 'value')
+            || Object.getOwnPropertyDescriptor(view?.HTMLTextAreaElement?.prototype || {}, 'value');
+
+          function readValue() {
+            return cleanText(input.value);
+          }
+
+          function setNativeValue(rawValue) {
+            if (descriptor?.set) {
+              descriptor.set.call(input, rawValue);
+            } else {
+              input.value = rawValue;
+            }
+            try {
+              input.setAttribute('value', rawValue);
+            } catch {}
+          }
+
+          function dispatchKeyboard(key, options = {}) {
+            try {
+              input.dispatchEvent(new view.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, ...options }));
+            } catch {}
+            try {
+              input.dispatchEvent(new view.KeyboardEvent('keyup', { bubbles: true, cancelable: true, key, ...options }));
+            } catch {}
+          }
+
+          function dispatchInputEvent(data, inputType) {
+            input.focus?.();
+            input.scrollIntoView?.({ block: 'center', inline: 'center' });
+            try {
+              if (view.InputEvent) {
+                input.dispatchEvent(new view.InputEvent('beforeinput', {
+                  bubbles: true,
+                  cancelable: true,
+                  data,
+                  inputType,
+                }));
+              }
+            } catch {}
+            try {
+              if (view.InputEvent) {
+                input.dispatchEvent(new view.InputEvent('input', {
+                  bubbles: true,
+                  data,
+                  inputType,
+                }));
+              } else {
+                input.dispatchEvent(new view.Event('input', { bubbles: true }));
+              }
+            } catch {
+              input.dispatchEvent(new view.Event('input', { bubbles: true }));
+            }
+          }
+
+          function finalizeInput() {
+            input.dispatchEvent(new view.Event('change', { bubbles: true }));
+            try {
+              input.dispatchEvent(new view.Event('blur', { bubbles: true }));
+            } catch {}
+            dispatchKeyboard('Tab');
+            input.blur?.();
+          }
+
+          function selectAll() {
+            input.focus?.();
+            input.scrollIntoView?.({ block: 'center', inline: 'center' });
+            dispatchKeyboard('a', { metaKey: true });
+            dispatchKeyboard('a', { ctrlKey: true });
+            input.select?.();
+            try {
+              input.setSelectionRange?.(0, String(input.value ?? '').length);
+            } catch {}
+          }
+
+          function applyFilledValue(rawValue) {
+            selectAll();
+            setNativeValue(rawValue);
+            dispatchInputEvent(rawValue, 'insertText');
+            finalizeInput();
+          }
+
+          function clearAndTypeValue(rawValue) {
+            selectAll();
+            dispatchKeyboard('Backspace');
+            setNativeValue('');
+            dispatchInputEvent('', 'deleteContentBackward');
+            for (const char of String(rawValue)) {
+              dispatchKeyboard(char);
+              setNativeValue(String(input.value ?? '') + char);
+              dispatchInputEvent(char, 'insertText');
+            }
+            finalizeInput();
+          }
+
+          applyFilledValue(nextValue);
+          let currentValue = '';
+          let deadline = now() + 1500;
+          while (now() < deadline) {
+            currentValue = readValue();
+            if (currentValue === nextValue) {
+              return true;
+            }
+            await wait(80);
+          }
+
+          clearAndTypeValue(nextValue);
+          deadline = now() + 1800;
+          while (now() < deadline) {
+            currentValue = readValue();
+            if (currentValue === nextValue) {
+              return true;
+            }
+            await wait(80);
+          }
+
+          applyFilledValue(nextValue);
+          deadline = now() + 1500;
+          while (now() < deadline) {
+            currentValue = readValue();
+            if (currentValue === nextValue) {
+              return true;
+            }
+            await wait(80);
+          }
+
+          return readValue() === nextValue;
+        }
+
+        function findSeckillNumberInput(frameInfo, index, labelText) {
+          const inputs = getSeckillNumberInputs(frameInfo.doc);
+          return findInputByLabel(frameInfo.doc, labelText)
+            || inputs[index]
+            || null;
+        }
+
+        async function fillSeckillNumberInput(frameInfo, index, labelText, value, timeoutMs) {
+          const deadline = now() + timeoutMs;
+          let lastSnapshot = null;
+          while (now() < deadline) {
+            const input = findSeckillNumberInput(frameInfo, index, labelText);
+            if (input && await setInputValue(input, value)) {
+              const snapshot = getSeckillFormSnapshot(frameInfo.doc);
+              lastSnapshot = snapshot;
+              if (snapshotInputMatches(snapshot, index, labelText, value)) {
+                return snapshot;
+              }
+            } else {
+              lastSnapshot = getSeckillFormSnapshot(frameInfo.doc);
+            }
+            await wait(150);
+          }
+          throw new Error(labelText + '未生效: ' + JSON.stringify(lastSnapshot));
+        }
+
+        async function waitFor(predicate, timeoutMs, label) {
+          const deadline = now() + timeoutMs;
+          while (now() < deadline) {
+            const result = predicate();
+            if (result) {
+              return result;
+            }
+            await wait(150);
+          }
+          throw new Error(label);
+        }
+
+        function activePopupFrame() {
+          const frames = listPopupFrames();
+          return frames.find((frameInfo) => {
+            return frameHasText(frameInfo, modeText)
+              && frameHasText(frameInfo, '投放库存')
+              && frameHasText(frameInfo, '每人限购')
+              && frameHasText(frameInfo, submitText);
+          }) || frames[0] || null;
+        }
+
+        function focusAndSelectInput(input) {
+          if (!input) {
+            return null;
+          }
+          input.scrollIntoView?.({ block: 'center', inline: 'center' });
+          clickElement(input);
+          try {
+            input.focus?.({ preventScroll: true });
+          } catch {}
+          try {
+            input.select?.();
+          } catch {}
+          try {
+            input.setSelectionRange?.(0, String(input.value ?? '').length);
+          } catch {}
+          return {
+            value: cleanText(input.value),
+            selectionStart: typeof input.selectionStart === 'number' ? input.selectionStart : null,
+            selectionEnd: typeof input.selectionEnd === 'number' ? input.selectionEnd : null,
+          };
+        }
+
+        async function focusSeckillNumberInputByLabel(labelText) {
+          const match = await waitFor(
+            () => {
+              const frameInfo = activePopupFrame();
+              if (!frameInfo) {
+                return null;
+              }
+              const input = findInputByLabel(frameInfo.doc, labelText);
+              if (!input) {
+                return null;
+              }
+              return { frameInfo, input };
+            },
+            uiTimeoutMs,
+            labelText + '输入框未就绪',
+          );
+          isolatePopupFrame(match.frameInfo);
+          return {
+            frameInfo: match.frameInfo,
+            focus: focusAndSelectInput(match.input),
+          };
+        }
+
+        async function prepareFrame(frameInfo, options = {}) {
+          const shouldFillInputs = options?.fillInputs !== false;
+          await waitFor(
+            () => {
+              if (frameHasText(frameInfo, modeText)
+                && frameHasText(frameInfo, '投放库存')
+                && frameHasText(frameInfo, '每人限购')
+                && frameHasText(frameInfo, submitText)) {
+                return frameInfo;
+              }
+              return null;
+            },
+            uiTimeoutMs,
+            '秒杀投放弹窗未进入可编辑状态',
+          );
+
+          if (frameHasText(frameInfo, '请选择')) {
+            const picker = findActionByText(frameInfo.doc, '请选择');
+            if (!picker) {
+              throw new Error('未找到秒杀活动选择器');
+            }
+            clickElement(picker);
+            await waitFor(
+              () => !frameHasText(frameInfo, '请选择') && frameHasText(frameInfo, '活动商品'),
+              uiTimeoutMs,
+              '未能选中秒杀活动',
+            );
+          }
+
+          await waitForSeckillFormStable(frameInfo, uiTimeoutMs);
+          await waitForSeckillImmediateReady(frameInfo, uiTimeoutMs);
+          await ensureDurationSelected(frameInfo, durationText, uiTimeoutMs);
+
+          await waitFor(
+            () => findSeckillNumberInput(frameInfo, 0, '投放库存') && findSeckillNumberInput(frameInfo, 1, '每人限购'),
+            uiTimeoutMs,
+            '未找到秒杀数字输入框',
+          );
+
+          if (shouldFillInputs) {
+            await fillSeckillNumberInput(frameInfo, 0, '投放库存', deployStock, uiTimeoutMs);
+            await fillSeckillNumberInput(frameInfo, 1, '每人限购', limitPerUser, uiTimeoutMs);
+          }
+
+          return getSeckillFormSnapshot(frameInfo.doc);
+        }
+
+        async function ensurePreparedPopup(fillInputs = true) {
+          const cardRoot = await waitFor(() => findCardRoot(), uiTimeoutMs, '未在直播商品列表中找到目标商品卡片');
+          const seckillButton = await waitFor(() => findSeckillButton(cardRoot), uiTimeoutMs, '目标商品未找到“秒杀哦”按钮');
+          const beforePopupIndex = getPopupMaxIndex();
+          let popupFrame = pickFrame();
+          if (popupFrame && isSeckillPopupFrame(popupFrame)) {
+            log('reused visible seckill drawer');
+          } else {
+            popupFrame = null;
+            clickElement(seckillButton);
+            log('clicked seckill button');
+            popupFrame = await waitFor(
+              () => {
+                const frameInfo = pickFrameSince(beforePopupIndex) || (beforePopupIndex < 0 ? pickFrame() : null);
+                if (!frameInfo) {
+                  return null;
+                }
+                if (isSeckillPopupFrame(frameInfo)) {
+                  return frameInfo;
+                }
+                return null;
+              },
+              uiTimeoutMs,
+              '未打开秒杀投放弹窗',
+            );
+          }
+          let popupFrames = listPopupFrames();
+          if (popupFrame && !popupFrames.some((item) => item.frame === popupFrame.frame)) {
+            popupFrames = rankFrameInfos([popupFrame, ...popupFrames]);
+          }
+          installCaptureOnAllFrames(popupFrames);
+
+          let preparedCount = 0;
+          let lastPrepareError = null;
+          for (const frameInfo of popupFrames) {
+            try {
+              const hadPicker = frameHasText(frameInfo, '请选择');
+              await prepareFrame(frameInfo, { fillInputs });
+              preparedCount += 1;
+              if (hadPicker) {
+                log('clicked activity picker');
+              }
+            } catch (error) {
+              lastPrepareError = error;
+              log('frame ' + frameInfo.index + ' skipped: ' + cleanText(error?.message || error));
+            }
+          }
+          if (preparedCount === 0) {
+            throw lastPrepareError || new Error('未能准备秒杀投放弹窗');
+          }
+          return activePopupFrame() || popupFrame;
+        }
+
+        if (stageName === 'prepare') {
+          const preparedFrame = await ensurePreparedPopup(false);
+          log('form stable');
+          log('immediate deploy ready');
+          log('selected 60-minute duration');
+          return {
+            ok: true,
+            stage: stageName,
+            snapshot: getSeckillFormSnapshot(preparedFrame.doc),
+            debug,
+          };
+        }
+
+        if (stageName === 'focus-input') {
+          const focused = await focusSeckillNumberInputByLabel(labelText);
+          return {
+            ok: true,
+            stage: stageName,
+            label: cleanText(labelText),
+            focus: focused.focus,
+            snapshot: getSeckillFormSnapshot(focused.frameInfo.doc),
+            debug,
+          };
+        }
+
+        if (stageName === 'read-state') {
+          const popupFrame = await waitFor(() => activePopupFrame(), uiTimeoutMs, '未找到秒杀投放弹窗');
+          return {
+            ok: true,
+            stage: stageName,
+            snapshot: getSeckillFormSnapshot(popupFrame.doc),
+            debug,
+          };
+        }
+
+        let popupFrame = null;
+        if (stageName === 'submit') {
+          popupFrame = await waitFor(() => activePopupFrame(), uiTimeoutMs, '未找到秒杀投放弹窗');
+          installCaptureOnAllFrames(listPopupFrames());
+        } else {
+          popupFrame = await ensurePreparedPopup(true);
+          log('form stable');
+          log('immediate deploy ready');
+          log('selected 60-minute duration');
+          log('filled deploy stock');
+          log('filled limit per user');
+          await wait(150);
+        }
+
+        popupFrame = await waitFor(
+          () => {
+            const readyFrame = listPopupFrames().find((frameInfo) => {
+              const snapshot = getSeckillFormSnapshot(frameInfo.doc);
+              const stockReady = snapshotInputMatches(snapshot, 0, '投放库存', deployStock);
+              const limitReady = snapshotInputMatches(snapshot, 1, '每人限购', limitPerUser);
+              return stockReady && limitReady && snapshot.submit && !snapshot.submit.disabled;
+            });
+            return readyFrame || null;
+          },
+          uiTimeoutMs,
+          '提交按钮未就绪',
+        );
+        log('submit ready');
+
+        const submitTarget = await waitFor(
+          () => findActionByText(popupFrame.doc, submitText, 'button', { allowDisabled: false }),
+          uiTimeoutMs,
+          '未找到“提交”按钮',
+        );
+        clickElement(submitTarget);
+        log('clicked submit');
+
+        const submitDeadline = now() + submitTimeoutMs;
+        while (now() < submitDeadline) {
+          const currentFrames = listPopupFrames();
+          const capture = readAllCaptures(currentFrames.length > 0 ? currentFrames : [popupFrame]);
+          if (capture.length > 0) {
+            const lastRecord = capture[capture.length - 1];
+            return {
+              ok: true,
+              action: 'submitted',
+              verified: true,
+              message: '已提交秒杀投放',
+              capture: lastRecord,
+              debug,
+            };
+          }
+          if (!isFrameAlive(popupFrame)) {
+            return {
+              ok: true,
+              action: 'submitted_unverified',
+              verified: false,
+              message: '已提交秒杀投放，弹窗已关闭，但未捕获到接口响应',
+              debug,
+            };
+          }
+          const frameState = getFrameState(popupFrame);
+          const frameText = frameState?.text || '';
+          if (/成功|提交成功|投放成功/.test(frameText)) {
+            return {
+              ok: true,
+              action: 'submitted_unverified',
+              verified: false,
+              message: '已提交秒杀投放',
+              popupText: frameText.slice(0, 200),
+              debug,
+            };
+          }
+          if (/失败|出错|异常/.test(frameText)) {
+            throw new Error(frameText.slice(0, 120) || '秒杀投放提交失败');
+          }
+          const pageText = textOf(document.body);
+          if (/成功|提交成功|投放成功/.test(pageText)) {
+            return {
+              ok: true,
+              action: 'submitted_unverified',
+              verified: false,
+              message: '已提交秒杀投放',
+              debug,
+            };
+          }
+          if (/失败|出错|异常/.test(pageText)) {
+            throw new Error(pageText.slice(0, 120) || '秒杀投放提交失败');
+          }
+          await wait(150);
+        }
+
+        throw new Error('点击提交后未在预期时间内拿到结果');
+      })()
+    `;
+}
+
+function snapshotFieldKeyForLabel(labelText) {
+    const normalized = clean(labelText);
+    if (normalized === '投放库存') {
+        return 'deployStock';
+    }
+    if (normalized === '每人限购') {
+        return 'limitPerUser';
+    }
+    return '';
+}
+
+function readSeckillSnapshotValue(snapshot, index, labelText) {
+    const fieldKey = snapshotFieldKeyForLabel(labelText);
+    const fieldValue = clean(snapshot?.fields?.[fieldKey]);
+    if (fieldValue) {
+        return fieldValue;
+    }
+    const inputItem = Array.isArray(snapshot?.inputs)
+        ? snapshot.inputs.find((entry) => Number(entry?.idx) === index)
+        : null;
+    return clean(inputItem?.value);
+}
+
+function snapshotSeckillInputMatches(snapshot, index, labelText, value) {
+    return readSeckillSnapshotValue(snapshot, index, labelText) === String(value);
+}
+
+function canUseNativeSeckillInput(page) {
+    const hasNativeText = typeof page.insertText === 'function' || typeof page.nativeType === 'function';
+    return hasNativeText && typeof page.nativeKeyPress === 'function';
+}
+
+async function insertTextNatively(page, text) {
+    if (typeof page.insertText === 'function') {
+        await page.insertText(text);
+        return;
+    }
+    if (typeof page.nativeType === 'function') {
+        await page.nativeType(text);
+        return;
+    }
+    throw new Error('native text insertion is not available');
+}
+
+async function runSeckillUiStage(page, options, stage, extra = {}) {
+    const rawResult = await evaluateWithArgs(page, buildSeckillUiAutomationJs(), {
+        ...options,
+        ...extra,
+        stage,
+    });
+    if (!rawResult || typeof rawResult !== 'object') {
+        throw new CommandExecutionError('EOS seckill UI flow returned an invalid result', '页面结构可能发生了变化，请稍后重试。');
+    }
+    if (!rawResult.ok) {
+        const message = clean(rawResult.message || rawResult.error || 'EOS 秒杀投放失败');
+        throw new CommandExecutionError(message || 'EOS 秒杀投放失败', '请确认当前商品支持“秒杀哦”投放，且弹窗已加载完成。');
+    }
+    return rawResult;
+}
+
+async function fillSeckillNumberInputNatively(page, options, index, labelText, value) {
+    const deadline = Date.now() + Number(options.uiTimeoutMs || SECKILL_UI_TIMEOUT_MS);
+    let lastSnapshot = null;
+    while (Date.now() < deadline) {
+        const focused = await runSeckillUiStage(page, options, 'focus-input', { labelText });
+        lastSnapshot = focused.snapshot;
+        if (snapshotSeckillInputMatches(lastSnapshot, index, labelText, value)) {
+            return lastSnapshot;
+        }
+
+        await insertTextNatively(page, String(value));
+        await page.nativeKeyPress('Tab');
+        await page.wait(0.15);
+        let state = await runSeckillUiStage(page, options, 'read-state');
+        lastSnapshot = state.snapshot;
+        if (snapshotSeckillInputMatches(lastSnapshot, index, labelText, value)) {
+            return lastSnapshot;
+        }
+
+        await runSeckillUiStage(page, options, 'focus-input', { labelText });
+        await page.nativeKeyPress('Backspace');
+        await insertTextNatively(page, String(value));
+        await page.nativeKeyPress('Tab');
+        await page.wait(0.15);
+        state = await runSeckillUiStage(page, options, 'read-state');
+        lastSnapshot = state.snapshot;
+        if (snapshotSeckillInputMatches(lastSnapshot, index, labelText, value)) {
+            return lastSnapshot;
+        }
+    }
+    throw new CommandExecutionError(`${labelText}未生效`, `已使用 opencli 原生文字输入，但 ${labelText} 仍未稳定写入。`);
+}
+
+async function submitSeckillViaUi(page, options) {
+    if (canUseNativeSeckillInput(page)) {
+        await runSeckillUiStage(page, options, 'prepare');
+        await fillSeckillNumberInputNatively(page, options, 0, '投放库存', options.deployStock);
+        await fillSeckillNumberInputNatively(page, options, 1, '每人限购', options.limitPerUser);
+        return runSeckillUiStage(page, options, 'submit');
+    }
+    return runSeckillUiStage(page, options, 'full');
+}
+
+function extractActivityId(capture) {
+    const response = capture?.response;
+    const data = response?.data ?? {};
+    return clean(data.discount_activity_id || data.activity_id);
+}
+
+function assertSaveResponseSucceeded(result) {
+    const response = result?.capture?.response;
+    if (!response || typeof response !== 'object' || !('status_code' in response)) {
+        return;
+    }
+    const code = Number(response.status_code);
+    if (!Number.isFinite(code) || code === 0) {
+        return;
+    }
+    const message = clean(response.status_msg || 'unknown error');
+    throw new CommandExecutionError(`EOS seckill save failed: ${message}`, '请检查当前商品是否具备可投放的秒杀活动。');
+}
+
+cli({
+    site: 'eos',
+    name: 'seckill',
+    aliases: ['drop-spike'],
+    description: '点击第 N 个商品的“秒杀哦”按钮，并按固定参数提交 60 分钟秒杀投放',
+    domain: 'eos.douyin.com',
+    strategy: Strategy.COOKIE,
+    browser: true,
+    args: [
+        { name: 'rank', required: true, positional: true, help: '商品序号，从 1 开始，对应 eos goods 的 rank' },
+        { name: 'stock', required: true, positional: true, help: '投放库存，正整数' },
+    ],
+    columns: ['status', 'action', 'rank', 'title', 'product_id', 'card_id', 'deploy_stock', 'limit_per_user', 'duration', 'activity_id', 'message'],
+    func: async (page, kwargs) => {
+        const rank = parsePositiveInt(kwargs.rank, 'rank', '1');
+        const deployStock = parsePositiveInt(kwargs.stock, 'stock', '10');
+        await page.goto(CURRENT_LIVE_URL);
+        await page.wait(2);
+        await ensureEosSession(page);
+
+        const { roomId, isLiving } = await getCurrentLiveStatus(page);
+        if (!roomId || roomId === DEFAULT_AGG_CARD_ID || !isLiving) {
+            throw new EmptyResultError('eos seckill', '当前没有检测到正在直播的房间，请开播后重试。');
+        }
+
+        const shelves = await fetchCurrentAnchorShelves(page, roomId);
+        const targetCard = resolveShelfCardByRank(shelves, rank);
+        assertCardCanSeckill(targetCard, deployStock);
+
+        const cardBase = targetCard?.card_base_info ?? {};
+        const cardId = clean(cardBase.card_id || targetCard?.card_id);
+        if (!cardId) {
+            throw new CommandExecutionError(`EOS seckill could not resolve card_id for rank ${rank}`, '请先使用 "opencli eos goods -f json" 检查当前货架商品。');
+        }
+
+        const uiResult = await submitSeckillViaUi(page, {
+            cardId,
+            deployStock,
+            limitPerUser: LIMIT_PER_USER,
+            modeText: DEPLOY_MODE_TEXT,
+            durationText: DURATION_TEXT,
+            submitText: '提交',
+            uiTimeoutMs: SECKILL_UI_TIMEOUT_MS,
+            submitTimeoutMs: SECKILL_SUBMIT_TIMEOUT_MS,
+        });
+        assertSaveResponseSucceeded(uiResult);
+
+        return [
+            buildSeckillResultRow(rank, targetCard, deployStock, clean(uiResult.action || 'submitted'), clean(uiResult.message || '已提交秒杀投放'), {
+                activityId: extractActivityId(uiResult.capture),
+            }),
+        ];
+    },
+});
+
+export const __test__ = {
+    LIMIT_PER_USER,
+    DURATION_TEXT,
+    DEPLOY_MODE_TEXT,
+    SECKILL_UI_TIMEOUT_MS,
+    SECKILL_SUBMIT_TIMEOUT_MS,
+    assertCardCanSeckill,
+    buildSeckillResultRow,
+    buildSeckillUiAutomationJs,
+    evaluateWithArgs,
+    extractActivityId,
+    assertSaveResponseSucceeded,
+};

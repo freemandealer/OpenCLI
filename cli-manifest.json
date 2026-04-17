@@ -1714,340 +1714,6 @@
   {
     "site": "binance",
     "name": "depth",
-    "description": "Order book bid prices for a trading pair",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "symbol",
-        "type": "str",
-        "required": true,
-        "positional": true,
-        "help": "Trading pair symbol (e.g. BTCUSDT, ETHUSDT)"
-      },
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 10,
-        "required": false,
-        "help": "Number of price levels (5, 10, 20, 50, 100)"
-      }
-    ],
-    "columns": [
-      "rank",
-      "bid_price",
-      "bid_qty"
-    ],
-    "type": "js",
-    "modulePath": "binance/depth.js",
-    "sourceFile": "binance/depth.js"
-  },
-  {
-    "site": "binance",
-    "name": "gainers",
-    "description": "Top gaining trading pairs by 24h price change",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 10,
-        "required": false,
-        "help": "Number of trading pairs"
-      }
-    ],
-    "columns": [
-      "rank",
-      "symbol",
-      "price",
-      "change_24h",
-      "volume"
-    ],
-    "type": "js",
-    "modulePath": "binance/gainers.js",
-    "sourceFile": "binance/gainers.js"
-  },
-  {
-    "site": "binance",
-    "name": "klines",
-    "description": "Candlestick/kline data for a trading pair",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "symbol",
-        "type": "str",
-        "required": true,
-        "positional": true,
-        "help": "Trading pair symbol (e.g. BTCUSDT, ETHUSDT)"
-      },
-      {
-        "name": "interval",
-        "type": "str",
-        "default": "1d",
-        "required": false,
-        "help": "Kline interval (1m, 5m, 15m, 1h, 4h, 1d, 1w, 1M)"
-      },
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 10,
-        "required": false,
-        "help": "Number of klines (max 1000)"
-      }
-    ],
-    "columns": [
-      "open",
-      "high",
-      "low",
-      "close",
-      "volume"
-    ],
-    "type": "js",
-    "modulePath": "binance/klines.js",
-    "sourceFile": "binance/klines.js"
-  },
-  {
-    "site": "binance",
-    "name": "losers",
-    "description": "Top losing trading pairs by 24h price change",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 10,
-        "required": false,
-        "help": "Number of trading pairs"
-      }
-    ],
-    "columns": [
-      "rank",
-      "symbol",
-      "price",
-      "change_24h",
-      "volume"
-    ],
-    "type": "js",
-    "modulePath": "binance/losers.js",
-    "sourceFile": "binance/losers.js"
-  },
-  {
-    "site": "binance",
-    "name": "pairs",
-    "description": "List active trading pairs on Binance",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 20,
-        "required": false,
-        "help": "Number of trading pairs"
-      }
-    ],
-    "columns": [
-      "symbol",
-      "base",
-      "quote",
-      "status"
-    ],
-    "type": "js",
-    "modulePath": "binance/pairs.js",
-    "sourceFile": "binance/pairs.js"
-  },
-  {
-    "site": "binance",
-    "name": "price",
-    "description": "Quick price check for a trading pair",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "symbol",
-        "type": "str",
-        "required": true,
-        "positional": true,
-        "help": "Trading pair symbol (e.g. BTCUSDT, ETHUSDT)"
-      }
-    ],
-    "columns": [
-      "symbol",
-      "price",
-      "change",
-      "change_pct",
-      "high",
-      "low",
-      "volume",
-      "quote_volume",
-      "trades"
-    ],
-    "type": "js",
-    "modulePath": "binance/price.js",
-    "sourceFile": "binance/price.js"
-  },
-  {
-    "site": "binance",
-    "name": "prices",
-    "description": "Latest prices for all trading pairs",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 20,
-        "required": false,
-        "help": "Number of prices"
-      }
-    ],
-    "columns": [
-      "rank",
-      "symbol",
-      "price"
-    ],
-    "type": "js",
-    "modulePath": "binance/prices.js",
-    "sourceFile": "binance/prices.js"
-  },
-  {
-    "site": "binance",
-    "name": "ticker",
-    "description": "24h ticker statistics for top trading pairs by volume",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 20,
-        "required": false,
-        "help": "Number of tickers"
-      }
-    ],
-    "columns": [
-      "symbol",
-      "price",
-      "change_pct",
-      "high",
-      "low",
-      "volume",
-      "quote_vol",
-      "trades"
-    ],
-    "type": "js",
-    "modulePath": "binance/ticker.js",
-    "sourceFile": "binance/ticker.js"
-  },
-  {
-    "site": "binance",
-    "name": "top",
-    "description": "Top trading pairs by 24h volume on Binance",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 20,
-        "required": false,
-        "help": "Number of trading pairs"
-      }
-    ],
-    "columns": [
-      "rank",
-      "symbol",
-      "price",
-      "change_24h",
-      "high",
-      "low",
-      "volume"
-    ],
-    "type": "js",
-    "modulePath": "binance/top.js",
-    "sourceFile": "binance/top.js"
-  },
-  {
-    "site": "binance",
-    "name": "trades",
-    "description": "Recent trades for a trading pair",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "symbol",
-        "type": "str",
-        "required": true,
-        "positional": true,
-        "help": "Trading pair symbol (e.g. BTCUSDT, ETHUSDT)"
-      },
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 20,
-        "required": false,
-        "help": "Number of trades (max 1000)"
-      }
-    ],
-    "columns": [
-      "id",
-      "price",
-      "qty",
-      "quote_qty",
-      "buyer_maker"
-    ],
-    "type": "js",
-    "modulePath": "binance/trades.js",
-    "sourceFile": "binance/trades.js"
-  },
-  {
-    "site": "binance",
-    "name": "asks",
-    "description": "Order book ask prices for a trading pair",
-    "domain": "data-api.binance.vision",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "symbol",
-        "type": "str",
-        "required": true,
-        "positional": true,
-        "help": "Trading pair symbol (e.g. BTCUSDT, ETHUSDT)"
-      },
-      {
-        "name": "limit",
-        "type": "int",
-        "default": 10,
-        "required": false,
-        "help": "Number of price levels (5, 10, 20, 50, 100)"
-      }
-    ],
-    "columns": [
-      "rank",
-      "ask_price",
-      "ask_qty"
-    ],
-    "type": "js",
-    "modulePath": "binance/asks.js",
-    "sourceFile": "binance/asks.js"
-  },
-  {
-    "site": "binance",
-    "name": "depth",
     "description": "Order book bid and ask prices for a trading pair",
     "domain": "data-api.binance.vision",
     "strategy": "public",
@@ -3547,7 +3213,7 @@
       {
         "name": "op",
         "type": "str",
-        "default": "/Users/hao/Pictures/chatgpt",
+        "default": "/Users/zhangzhengyu01/Pictures/chatgpt",
         "required": false,
         "help": "Output directory"
       },
@@ -6037,6 +5703,216 @@
     "navigateBefore": true
   },
   {
+    "site": "eos",
+    "name": "cancel-explain",
+    "aliases": [
+      "stop-explain"
+    ],
+    "description": "取消第 N 个直播商品的讲解；不传 rank 时取消当前正在讲解的商品",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [
+      {
+        "name": "rank",
+        "type": "str",
+        "required": false,
+        "positional": true,
+        "help": "商品序号，从 1 开始；不传则取消当前正在讲解的商品"
+      }
+    ],
+    "columns": [
+      "status",
+      "action",
+      "rank",
+      "title",
+      "product_id",
+      "card_id",
+      "is_showing",
+      "message"
+    ],
+    "type": "js",
+    "modulePath": "eos/cancel-explain.js",
+    "sourceFile": "eos/cancel-explain.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
+    "site": "eos",
+    "name": "data",
+    "description": "eos data (recorded)",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [
+      {
+        "name": "limit",
+        "type": "int",
+        "default": 20,
+        "required": false,
+        "help": "Number of items"
+      }
+    ],
+    "columns": [
+      "rank",
+      "title",
+      "url"
+    ],
+    "type": "js",
+    "modulePath": "eos/data.js",
+    "sourceFile": "eos/data.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
+    "site": "eos",
+    "name": "data_2",
+    "description": "eos data_2 (recorded write)",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [],
+    "columns": [
+      "has_quest_tab",
+      "status_code",
+      "status_msg"
+    ],
+    "type": "js",
+    "modulePath": "eos/data_2.js",
+    "sourceFile": "eos/data_2.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
+    "site": "eos",
+    "name": "explain",
+    "description": "开始讲解第 N 个直播商品（按 goods 的 rank）",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [
+      {
+        "name": "rank",
+        "type": "str",
+        "required": true,
+        "positional": true,
+        "help": "商品序号，从 1 开始，对应 eos goods 的 rank"
+      }
+    ],
+    "columns": [
+      "status",
+      "action",
+      "rank",
+      "title",
+      "product_id",
+      "card_id",
+      "is_showing",
+      "message"
+    ],
+    "type": "js",
+    "modulePath": "eos/explain.js",
+    "sourceFile": "eos/explain.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
+    "site": "eos",
+    "name": "goods",
+    "description": "当前直播间货架商品列表",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [
+      {
+        "name": "limit",
+        "type": "int",
+        "default": 20,
+        "required": false,
+        "help": "返回商品数量（max 100）"
+      }
+    ],
+    "columns": [
+      "rank",
+      "product_id",
+      "title",
+      "price",
+      "commission_rate",
+      "sold",
+      "tab",
+      "is_showing"
+    ],
+    "type": "js",
+    "modulePath": "eos/goods.js",
+    "sourceFile": "eos/goods.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
+    "site": "eos",
+    "name": "hot",
+    "description": "eos hot (recorded)",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [
+      {
+        "name": "limit",
+        "type": "int",
+        "default": 20,
+        "required": false,
+        "help": "Number of items"
+      }
+    ],
+    "columns": [
+      "rank",
+      "title",
+      "url"
+    ],
+    "type": "js",
+    "modulePath": "eos/hot.js",
+    "sourceFile": "eos/hot.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
+    "site": "eos",
+    "name": "seckill",
+    "aliases": [
+      "drop-spike"
+    ],
+    "description": "点击第 N 个商品的“秒杀哦”按钮，并按固定参数提交 60 分钟秒杀投放",
+    "domain": "eos.douyin.com",
+    "strategy": "cookie",
+    "browser": true,
+    "args": [
+      {
+        "name": "rank",
+        "type": "str",
+        "required": true,
+        "positional": true,
+        "help": "商品序号，从 1 开始，对应 eos goods 的 rank"
+      },
+      {
+        "name": "stock",
+        "type": "str",
+        "required": true,
+        "positional": true,
+        "help": "投放库存，正整数"
+      }
+    ],
+    "columns": [
+      "status",
+      "action",
+      "rank",
+      "title",
+      "product_id",
+      "card_id",
+      "deploy_stock",
+      "limit_per_user",
+      "duration",
+      "activity_id",
+      "message"
+    ],
+    "type": "js",
+    "modulePath": "eos/seckill.js",
+    "sourceFile": "eos/seckill.js",
+    "navigateBefore": "https://eos.douyin.com"
+  },
+  {
     "site": "facebook",
     "name": "add-friend",
     "description": "Send a friend request on Facebook",
@@ -6466,7 +6342,7 @@
       {
         "name": "op",
         "type": "str",
-        "default": "/Users/hao/tmp/gemini-images",
+        "default": "/Users/zhangzhengyu01/tmp/gemini-images",
         "required": false,
         "help": "Output directory shorthand"
       },
@@ -7582,7 +7458,7 @@
       {
         "name": "path",
         "type": "str",
-        "default": "/Users/hao/Downloads/Instagram",
+        "default": "/Users/zhangzhengyu01/Downloads/Instagram",
         "required": false,
         "help": "Download directory"
       }
@@ -14761,38 +14637,6 @@
   },
   {
     "site": "twitter",
-    "name": "post-media",
-    "description": "Post a tweet with an attached video or image",
-    "domain": "x.com",
-    "strategy": "ui",
-    "browser": true,
-    "args": [
-      {
-        "name": "text",
-        "type": "string",
-        "required": true,
-        "positional": true,
-        "help": "Tweet text"
-      },
-      {
-        "name": "media",
-        "type": "string",
-        "required": true,
-        "help": "Path to a local video or image file"
-      }
-    ],
-    "columns": [
-      "status",
-      "tweet_id",
-      "message"
-    ],
-    "type": "js",
-    "modulePath": "twitter/post-media.js",
-    "sourceFile": "twitter/post-media.js",
-    "navigateBefore": true
-  },
-  {
-    "site": "twitter",
     "name": "profile",
     "description": "Fetch a Twitter user profile (bio, stats, etc.)",
     "domain": "x.com",
@@ -16879,55 +16723,6 @@
   },
   {
     "site": "xiaoyuzhou",
-    "name": "transcript",
-    "description": "Download Xiaoyuzhou transcript as JSON and text (requires local credentials)",
-    "domain": "www.xiaoyuzhoufm.com",
-    "strategy": "public",
-    "browser": false,
-    "args": [
-      {
-        "name": "id",
-        "type": "str",
-        "required": true,
-        "positional": true,
-        "help": "Episode ID (eid from podcast-episodes output)"
-      },
-      {
-        "name": "output",
-        "type": "str",
-        "default": "./xiaoyuzhou-transcripts",
-        "required": false,
-        "help": "Output directory"
-      },
-      {
-        "name": "json",
-        "type": "boolean",
-        "default": true,
-        "required": false,
-        "help": "Save transcript JSON file"
-      },
-      {
-        "name": "text",
-        "type": "boolean",
-        "default": true,
-        "required": false,
-        "help": "Save extracted transcript text file"
-      }
-    ],
-    "columns": [
-      "title",
-      "podcast",
-      "status",
-      "segments",
-      "json_file",
-      "text_file"
-    ],
-    "type": "js",
-    "modulePath": "xiaoyuzhou/transcript.js",
-    "sourceFile": "xiaoyuzhou/transcript.js"
-  },
-  {
-    "site": "xiaoyuzhou",
     "name": "episode",
     "description": "View details of a Xiaoyuzhou podcast episode",
     "domain": "www.xiaoyuzhoufm.com",
@@ -17016,6 +16811,55 @@
     "type": "js",
     "modulePath": "xiaoyuzhou/podcast-episodes.js",
     "sourceFile": "xiaoyuzhou/podcast-episodes.js"
+  },
+  {
+    "site": "xiaoyuzhou",
+    "name": "transcript",
+    "description": "Download Xiaoyuzhou transcript as JSON and text (requires local credentials)",
+    "domain": "www.xiaoyuzhoufm.com",
+    "strategy": "public",
+    "browser": false,
+    "args": [
+      {
+        "name": "id",
+        "type": "str",
+        "required": true,
+        "positional": true,
+        "help": "Episode ID (eid from podcast-episodes output)"
+      },
+      {
+        "name": "output",
+        "type": "str",
+        "default": "./xiaoyuzhou-transcripts",
+        "required": false,
+        "help": "Output directory"
+      },
+      {
+        "name": "json",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "help": "Save transcript JSON file"
+      },
+      {
+        "name": "text",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "help": "Save extracted transcript text file"
+      }
+    ],
+    "columns": [
+      "title",
+      "podcast",
+      "status",
+      "segments",
+      "json_file",
+      "text_file"
+    ],
+    "type": "js",
+    "modulePath": "xiaoyuzhou/transcript.js",
+    "sourceFile": "xiaoyuzhou/transcript.js"
   },
   {
     "site": "xueqiu",

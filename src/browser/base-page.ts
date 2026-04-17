@@ -24,6 +24,7 @@ import {
 import { resolveTargetJs, clickResolvedJs, typeResolvedJs, scrollResolvedJs } from './target-resolver.js';
 import { TargetError } from './target-errors.js';
 import { formatSnapshot } from '../snapshotFormatter.js';
+import { wrapForEval } from './utils.js';
 export abstract class BasePage implements IPage {
   protected _lastUrl: string | null = null;
   /** Cached previous snapshot hashes for incremental diff marking */
@@ -51,7 +52,8 @@ export abstract class BasePage implements IPage {
         return `const ${key} = ${JSON.stringify(value)};`;
       })
       .join('\n');
-    return this.evaluate(`${declarations}\n${js}`);
+    const wrapped = wrapForEval(js);
+    return this.evaluate(`(async () => {\n${declarations}\nreturn await (${wrapped});\n})()`);
   }
 
   abstract getCookies(opts?: { domain?: string; url?: string }): Promise<BrowserCookie[]>;
