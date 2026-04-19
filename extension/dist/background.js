@@ -452,24 +452,17 @@ function scheduleReconnect() {
 		connect();
 	}, delay);
 }
-var DEFAULT_WINDOW_IDLE_TIMEOUT_MS = 12e4;
 var automationSessions = /* @__PURE__ */ new Map();
+var WINDOW_IDLE_TIMEOUT = 3e4;
 var windowFocused = false;
-var windowIdleTimeoutMs = DEFAULT_WINDOW_IDLE_TIMEOUT_MS;
 function getWorkspaceKey(workspace) {
 	return workspace?.trim() || "default";
 }
-function getCommandWindowIdleTimeoutMs(cmd) {
-	const value = cmd.windowIdleTimeoutMs;
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_WINDOW_IDLE_TIMEOUT_MS;
-}
-function resetWindowIdleTimer(workspace, idleTimeoutMs) {
+function resetWindowIdleTimer(workspace) {
 	const session = automationSessions.get(workspace);
 	if (!session) return;
-	const effectiveIdleTimeoutMs = idleTimeoutMs ?? session.idleTimeoutMs ?? DEFAULT_WINDOW_IDLE_TIMEOUT_MS;
-	session.idleTimeoutMs = effectiveIdleTimeoutMs;
 	if (session.idleTimer) clearTimeout(session.idleTimer);
-	session.idleDeadlineAt = Date.now() + effectiveIdleTimeoutMs;
+	session.idleDeadlineAt = Date.now() + WINDOW_IDLE_TIMEOUT;
 	session.idleTimer = setTimeout(async () => {
 		const current = automationSessions.get(workspace);
 		if (!current) return;
@@ -483,7 +476,7 @@ function resetWindowIdleTimer(workspace, idleTimeoutMs) {
 			console.log(`[opencli] Automation window ${current.windowId} (${workspace}) closed (idle timeout)`);
 		} catch {}
 		automationSessions.delete(workspace);
-	}, effectiveIdleTimeoutMs);
+	}, WINDOW_IDLE_TIMEOUT);
 }
 /** Get or create the dedicated automation window.
 *  @param initialUrl — if provided (http/https), used as the initial page instead of about:blank.
@@ -508,14 +501,13 @@ async function getAutomationWindow(workspace, initialUrl) {
 	const session = {
 		windowId: win.id,
 		idleTimer: null,
-		idleDeadlineAt: Date.now() + windowIdleTimeoutMs,
+		idleDeadlineAt: Date.now() + WINDOW_IDLE_TIMEOUT,
 		owned: true,
-		preferredTabId: null,
-		idleTimeoutMs: windowIdleTimeoutMs
+		preferredTabId: null
 	};
 	automationSessions.set(workspace, session);
 	console.log(`[opencli] Created automation window ${session.windowId} (${workspace}, start=${startUrl})`);
-	resetWindowIdleTimer(workspace, windowIdleTimeoutMs);
+	resetWindowIdleTimer(workspace);
 	const tabs = await chrome.tabs.query({ windowId: win.id });
 	if (tabs[0]?.id) await new Promise((resolve) => {
 		const timeout = setTimeout(resolve, 500);
@@ -571,8 +563,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 async function handleCommand(cmd) {
 	const workspace = getWorkspaceKey(cmd.workspace);
 	windowFocused = cmd.windowFocused === true;
-	windowIdleTimeoutMs = getCommandWindowIdleTimeoutMs(cmd);
-	resetWindowIdleTimer(workspace, windowIdleTimeoutMs);
+	resetWindowIdleTimer(workspace);
 	try {
 		switch (cmd.action) {
 			case "exec": return await handleExec(cmd, workspace);
@@ -653,7 +644,7 @@ function setWorkspaceSession(workspace, session) {
 	automationSessions.set(workspace, {
 		...session,
 		idleTimer: null,
-		idleDeadlineAt: Date.now() + session.idleTimeoutMs
+		idleDeadlineAt: Date.now() + WINDOW_IDLE_TIMEOUT
 	});
 }
 /**
@@ -1166,10 +1157,9 @@ async function handleBindCurrent(cmd, workspace) {
 	setWorkspaceSession(workspace, {
 		windowId: boundTab.windowId,
 		owned: false,
-		preferredTabId: boundTab.id,
-		idleTimeoutMs: windowIdleTimeoutMs
+		preferredTabId: boundTab.id
 	});
-	resetWindowIdleTimer(workspace, windowIdleTimeoutMs);
+	resetWindowIdleTimer(workspace);
 	console.log(`[opencli] Workspace ${workspace} explicitly bound to tab ${boundTab.id} (${boundTab.url})`);
 	return pageScopedResult(cmd.id, boundTab.id, {
 		url: boundTab.url,
